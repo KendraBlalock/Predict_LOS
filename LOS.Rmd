@@ -1,0 +1,245 @@
+---
+title: "Predicting Long Inpatient Stays"
+output: html_document
+date: "2024-06-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## The Goal
+I wanted to explore a few supervised machine learning classification models at a superficial level to get a feel for how each works. Below I have used naive bayes, k-nearest neighbors, logistic regression, and support vector machines to run the same predictions of which patients will have long inpatient stays of 8 days or more. 
+
+## The Data
+I used the Basic Stand Alone (BSA) Inpatient Public Use Files (PUF) containing information about 2008 CMS Medicare inpatient claims available [here](https://www.cms.gov/data-research/statistics-trends-and-reports/basic-stand-alone-medicare-claims-public-use-files/bsa-inpatient-claims-puf). 
+
+
+## Variable Overview
+The full data dictionary can be found [here](file:///C:/Users/lynx2/Documents/R%20work/ClaimsMachineLearning/176744_2008_BSA_Inpatient_Claims_PUF_DataDic_CB.pdf). Below are the variable definitions. 
+
+BENE_SEX_IDENT_CD
+This field indicates the sex of the beneficiary.
+
+BENE_AGE_CAT_CD
+This categorical variable is based on the beneficiary's age at end of the reference year (2008).
+
+IP_CLM_BASE_DRG_CD
+This is a categorical variable. It represents diagnostic related groups (DRGs).
+
+IP_CLM_ICD9_PRCDR_CD
+This code indicates the primary procedure (mainly surgical procedures) performed during the inpatient stay.
+
+IP_CLM_DAYS_CD
+This categorical variable is based on the number of inpatient days (or length of stay) on a claim for all stays ending in 2008. 
+
+IP_DRG_QUINT_PMT_AVG
+This field contains the average Medicare total claim payment amount of the quintile for the payments (of a particular DRG) in the 100% Inpatient claims data for 2008.
+
+IP_DRG_QUINT_PMT_CD
+This categorical field indicates the quintile value (or code) to which the actual Medicare payment amount on the claim belongs.
+
+```{r loadlibrarydata}
+#load libraries
+library(dplyr)
+library(tidyr)
+library(naivebayes)
+library(caret)
+library(class)
+library(e1071)
+
+#load data
+ip_data <- read.csv("2008_BSA_Inpatient_Claims_PUF.csv")
+
+#review data
+str(ip_data)
+head(ip_data, 10)
+
+#build new variable to flag long in-patient stays
+ip_data <- ip_data %>% 
+  mutate(IP_long_stay_fl = case_when(IP_CLM_DAYS_CD <4 ~ 0, 
+            IP_CLM_DAYS_CD ==4 ~ 1))
+
+table(ip_data$IP_CLM_DAYS_CD, ip_data$IP_long_stay_fl)
+
+ip_data %>% group_by(BENE_SEX_IDENT_CD) %>% count()
+ip_data %>% group_by(BENE_AGE_CAT_CD) %>% count()
+ip_data %>% distinct(IP_CLM_BASE_DRG_CD) %>% count()
+
+```
+
+## Prepare Training, Validation, and Test Datasets
+
+```{r datasets}
+#set categorical variables as factors
+ip_data$BENE_SEX_IDENT_CD <- as.factor(ip_data$BENE_SEX_IDENT_CD)
+ip_data$BENE_AGE_CAT_CD <- as.factor(ip_data$BENE_AGE_CAT_CD)
+ip_data$IP_CLM_BASE_DRG_CD <- as.factor(ip_data$IP_CLM_BASE_DRG_CD)
+ip_data$IP_long_stay_fl <- as.factor(ip_data$IP_long_stay_fl)
+
+#set seed
+set.seed(12345)
+
+#set test data and train data for model
+ip_intrain<-createDataPartition(ip_data$IP_CLM_DAYS_CD,p=0.8,list=FALSE)
+ip_training<-ip_data[ip_intrain,]
+ip_testing<-ip_data[-ip_intrain,]
+
+#divide up the training data into a main training set and a validation set
+ip_intrain2<-createDataPartition(y=ip_training$IP_CLM_DAYS_CD,p=0.8,list=FALSE)
+ip_train<-ip_training[ip_intrain2,]
+ip_validation<-ip_training[-ip_intrain2,]
+
+rm(ip_training, ip_intrain, ip_intrain2)
+```
+
+## Naive Bayes
+```{r nb_train}
+#train model
+ip_model_nb <- naive_bayes(IP_long_stay_fl ~ BENE_SEX_IDENT_CD + BENE_AGE_CAT_CD + IP_CLM_BASE_DRG_CD, data = ip_train, laplace = 1)
+
+plot(ip_model_nb)
+
+```
+
+```{r nb_validate}
+#use model to predict validation data
+val_nb1 <- predict(ip_model_nb, ip_validation)  #, type = "prob"
+val_nb2 <- cbind(ip_validation, val_nb1)
+
+#comparison of categorization
+(comp_nb <- table(val_nb2$IP_long_stay_fl, val_nb2$val_nb1))
+
+#misclassification %
+1- sum(diag(comp_nb))/sum(comp_nb)
+
+rm(val_nb2, comp_nb, val_nb1)
+
+```
+
+## K-Nearest Neighbors
+```{r knn_train}
+#train model
+ip_train_knn <- ip_train %>% select(IP_long_stay_fl, BENE_SEX_IDENT_CD, BENE_AGE_CAT_CD,IP_CLM_BASE_DRG_CD) %>% distinct()
+
+ip_validation_knn <- ip_validation %>% select(IP_long_stay_fl, BENE_SEX_IDENT_CD, BENE_AGE_CAT_CD,IP_CLM_BASE_DRG_CD) %>%  distinct()
+
+
+ip_model_knn <- knn(
+                 train = ip_train_knn[-1], 
+                 test = ip_validation_knn[-1],
+                 cl = ip_train_knn$IP_long_stay_fl, 
+                 k=300,
+                 use.all = F
+                 )
+
+```
+
+```{r knn_validate}
+#use model to predict validation data
+val_knn1 <-  cbind(ip_validation_knn, ip_model_knn)
+val_knn2 <- ip_validation %>% left_join(val_knn1)
+
+#comparison of categorization
+(comp_knn <- table(val_knn2$IP_long_stay_fl, val_knn2$ip_model_knn))
+
+#Misclassification %
+1- sum(diag(comp_knn))/sum(comp_knn)
+
+rm(ip_validation_knn, val_knn1, val_knn2, ip_model_knn, comp_knn)
+
+```
+
+## Logistic Regression
+```{r lr_train}
+#train model
+ip_model_lr <- glm(IP_long_stay_fl ~ BENE_SEX_IDENT_CD + BENE_AGE_CAT_CD + IP_CLM_BASE_DRG_CD,
+                   data = ip_train_knn,
+                   family = "binomial")
+
+```
+
+```{r lr_validate}
+#use model to predict validation data
+val_lr1a <- predict(ip_model_lr, ip_validation[2:4], type = "response")  
+
+val_lr1b <- ifelse(val_lr1a > mean(val_lr1a), 1, 0)
+val_lr2 <- cbind(ip_validation, val_lr1b)
+
+#comparison of categorization
+(comp_lr <- table(val_lr2$IP_long_stay_fl, val_lr2$val_lr1b))
+
+#Misclassification %
+1- sum(diag(comp_lr))/sum(comp_lr)
+
+rm(comp_lr, val_lr1a, val_lr1b, val_lr2)
+
+```
+
+## SVM (Support Vector Machines)-Linear Kernal
+
+```{r svm_train}
+#train model
+ip_train_svm <- ip_train %>% select(IP_long_stay_fl, BENE_SEX_IDENT_CD, BENE_AGE_CAT_CD,IP_CLM_BASE_DRG_CD) %>% distinct()
+
+ip_validation_svm <- ip_validation %>% select(IP_long_stay_fl, BENE_SEX_IDENT_CD, BENE_AGE_CAT_CD,IP_CLM_BASE_DRG_CD) %>%  distinct()
+
+
+ip_model_svm <- svm(IP_long_stay_fl  ~ BENE_SEX_IDENT_CD + BENE_AGE_CAT_CD + IP_CLM_BASE_DRG_CD,
+                    data = ip_train_svm,
+                    type= "C-classification",
+                    kernel = "linear", 
+                    scale = FALSE)
+ip_model_svm
+
+```
+
+```{r svm_validate}
+#use model to predict validation data
+val_svm1 <- predict(ip_model_svm, ip_validation_svm[-1])  
+val_svm1b <-cbind(ip_validation_svm, val_svm1)
+val_svm2 <- ip_validation %>% left_join(val_svm1b)
+
+#comparison of categorization
+(comp_svm <- table(val_svm2$IP_long_stay_fl, val_svm2$val_svm1))
+
+#Misclassification %
+1- sum(diag(comp_svm))/sum(comp_svm)
+
+rm(ip_model_svm, ip_validation_svm, comp_svm, val_svm1,val_svm1b, val_svm2)
+
+```
+## Testing
+After the initial run with the training data, we see the following misclassification rate for each approach with the validation data: 
+
+* naive bayes:         0.1770248
+* k-nearest neighbors: 0.23228
+* logistic regression: 0.524202
+* SVM:                 0.2133199
+
+As naive bayes had the lowest misclassification rate, I used this approach for running the final testing dataset. 
+
+```{r nb_test}
+#use model to predict test data
+val_nb1 <- predict(ip_model_nb, ip_testing) 
+val_nb2 <- cbind(ip_testing, val_nb1)
+
+#comparison of categorization
+(comp_nb <- table(val_nb2$IP_long_stay_fl, val_nb2$val_nb1))
+
+#Misclassification %
+1- sum(diag(comp_nb))/sum(comp_nb)
+
+rm(val_nb2, comp_nb, val_nb1)
+
+```
+The final misclassification rate for the test data using naive bayes was 17.65%. This was a short preview of several machine learning approaches. Next time I look forward to digging deeper into other metrics to use for evaluating each model's performance as well as learning more about K-fold Cross-Validation.
+
+![](hosptial2.png)
+
+
+
+
+
+
+
